@@ -10,6 +10,7 @@
 #include <Trade\Trade.mqh>
 #include <ChartObjects\ChartObjectsTxtControls.mqh>
 
+
 //-------------------- Couleurs Spéciales ---------------------------
 #define COLOR_ACTIVE clrWhite
 #define COLOR_INACTIVE clrRed
@@ -111,15 +112,9 @@ void     InitializeIndicators();
 void     UpdateIndicators();
 double   CalcDynamicLot(double risk, double balance, double sl_pips, double min_lot, double max_lot);
 void     ExecuteStrategies();
-void     UpdateDashboard();
+void     CreateDashboardPro();
+void     UpdateDashboardPro(double balance, double equity, double profit, double spread, int trades, double lots, double winrate, double dailyPL, string statut, string erreur);
 void     DeleteDashboardPro();
-void     DrawDashboardHeader();
-void     DrawDashboardStats();
-void     DrawDashboardDaily();
-void     DrawDashboardStrats();
-void     DrawDashboardButton();
-void     DrawDashboardStatus();
-void     DrawDashboardSpread();
 int      CountOpenPositions(ENUM_POSITION_TYPE posType);
 void     FullCloseAll();
 void     PartialCloseManager();
@@ -674,6 +669,7 @@ void FullCloseAll()
 
 void CreateDashboardPro()
   {
+   // --- Création rectangle de fond OPAQUE pour le dashboard ---
    if(ObjectFind(0,"dashboard_bg")<0)
      {
       ObjectCreate(0,"dashboard_bg",OBJ_RECTANGLE_LABEL,0,0,0);
@@ -684,10 +680,13 @@ void CreateDashboardPro()
       ObjectSetInteger(0,"dashboard_bg",OBJPROP_YSIZE,DASHBOARD_HEIGHT);
       ObjectSetInteger(0,"dashboard_bg",OBJPROP_BGCOLOR,DASHBOARD_BG);
       ObjectSetInteger(0,"dashboard_bg",OBJPROP_COLOR,DASHBOARD_BG);
-      ObjectSetInteger(0,"dashboard_bg",OBJPROP_BACK,true);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_BACK,false); // false = devant les bougies
       ObjectSetInteger(0,"dashboard_bg",OBJPROP_SELECTABLE,false);
       ObjectSetInteger(0,"dashboard_bg",OBJPROP_SELECTED,false);
       ObjectSetInteger(0,"dashboard_bg",OBJPROP_BORDER_TYPE,BORDER_FLAT);
+
+      // LIGNE SUPPRIMÉE : OBJPROP_TRANSPARENCY n'existe pas sur ta version MQL5
+      // Le rectangle est entièrement opaque par défaut !
      }
    if(ObjectFind(0,"dashboard_title")<0)
      {
@@ -741,13 +740,13 @@ void CreateDashboardPro()
       ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_CORNER,CORNER_LEFT_UPPER);
       ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_XDISTANCE,DASHBOARD_POS+28);
       ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_YDISTANCE,y0+10*dy);
-      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_WIDTH,170);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_WIDTH,280);
       ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_YSIZE,28);
       ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_BGCOLOR,clrRed);
       ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_COLOR,clrWhite);
       ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_BORDER_TYPE,BORDER_RAISED);
-      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_FONTSIZE,13);
-      ObjectSetString(0,"dashboard_FullCloseBtn",OBJPROP_TEXT,"FULL CLOSE (Confirmer)");
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_FONTSIZE,10);
+      ObjectSetString(0,"dashboard_FullCloseBtn",OBJPROP_TEXT,"CLOSE");
      }
    if(ObjectFind(0,"dashboard_Erreur")<0)
      {
@@ -773,7 +772,11 @@ void UpdateDashboardPro(double balance, double equity, double profit, double spr
    ObjectSetString(0,"dashboard_DailyPL",OBJPROP_TEXT, StringFormat("P/L du jour   : %s%.2f", dailyPL>=0?"+":"", dailyPL));
    ObjectSetInteger(0,"dashboard_DailyPL",OBJPROP_COLOR, dailyPL>=0?clrForestGreen:clrFireBrick);
    ObjectSetString(0,"dashboard_Status",OBJPROP_TEXT, "Statut EA : " + statut);
-   ObjectSetString(0,"dashboard_Erreur",OBJPROP_TEXT, (erreur!="") ? "Erreur : "+erreur : "");
+
+   // NE PLUS JAMAIS AFFICHER D’ERREUR :
+   // ObjectSetString(0,"dashboard_Erreur",OBJPROP_TEXT, (erreur!="") ? "Erreur : "+erreur : "");
+   // Option : supprimer l’objet s’il existe encore (facultatif)
+   ObjectDelete(0,"dashboard_Erreur");
   }
 
 void DeleteDashboardPro()
@@ -789,7 +792,6 @@ void DeleteDashboardPro()
   }
 
 // ========== FIN DASHBOARD PRO ==========
-
   
   // ===================== SYSTEME PRINCIPAL MQL5 =======================
 
@@ -842,16 +844,38 @@ int OnInit()
    InitializeIndicators();
    strategies_total_init();
    CreateDashboardPro();
-   UpdateDashboard();
+
+   // ----------- Bloc pour dashboard PRO -----------
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double profit = AccountInfoDouble(ACCOUNT_PROFIT);
+   double spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
+   int trades = 0; double lots = 0.0;
+   for(int i=0; i<PositionsTotal(); i++)
+     if(PositionGetString(POSITION_SYMBOL)==_Symbol)
+       { trades++; lots+=PositionGetDouble(POSITION_VOLUME); }
+   int wins = 0, total = 0;
+   for(int i=0;i<strategies_total;i++) { wins += strategies[i].Wins; total += strategies[i].TotalTrades; }
+   double winrate = (total>0) ? 100.0*wins/total : 0.0;
+   double dailyPL = 0.0;
+   datetime today = DateOfDay(TimeCurrent());
+   for(int i=0;i<ArraySize(day_stats);i++)
+     if(day_stats[i].Day==today)
+       { dailyPL = day_stats[i].Profit; break; }
+   string statut = (ea_active ? "ACTIVE" : "PAUSE");
+   string erreur = last_error;
+
+   UpdateDashboardPro(balance, equity, profit, spread, trades, lots, winrate, dailyPL, statut, erreur);
+   // -----------------------------------------------
+
    EventSetTimer(60);
-   
    return(INIT_SUCCEEDED);
   }
 
 // Désinitialisation
 void OnDeinit(const int reason)
   {
-   DeleteDashboard();
+   DeleteDashboardPro();
    EventKillTimer();
   }
 
@@ -863,23 +887,15 @@ void OnTick()
    PartialCloseManager();
    TrailingStopManager();
 
+   // Retirer l'EA automatiquement dès que le bouton est cliqué
    if(full_close_triggered && EnableFullClose)
      {
-      // Confirmation demandée avant fermeture totale
-      static datetime last_confirm = 0;
-      if(last_confirm==0 || (TimeCurrent()-last_confirm) > 30)
-        {
-         last_error = "Cliquez à nouveau sur FULL CLOSE pour confirmer !";
-         last_confirm = TimeCurrent();
-        }
-      else
-        {
-         FullCloseAll();
-         last_error = "FULL CLOSE exécuté !";
-         last_confirm = 0;
-        }
+      Print("L'EA est retiré du graphique !");
+      ExpertRemove(); // L'EA s'arrête et se retire du graphique
+      // Pas de confirmation, pas de fermeture de positions
       full_close_triggered = false;
       dashboard_needs_update = true;
+      return; // On sort de OnTick, l'EA sera arrêté
      }
 
    // -------- DÉBUT DU BLOC DASHBOARD PRO --------
@@ -896,23 +912,19 @@ void OnTick()
          lots += PositionGetDouble(POSITION_VOLUME);
         }
      }
-   double winrate = 0.0;  // À remplacer par ton calcul réel si tu l’as
+   double winrate = 0.0;  // À calculer selon ta logique réelle
    double dailyPL = 0.0;  // Idem
    string statut = (ea_active ? "ACTIVE" : "PAUSE");
-   string erreur = last_error;
-   UpdateDashboard(balance, equity, profit, spread, trades, lots, winrate, dailyPL, statut, erreur);
+   // Pas d'affichage d'erreur !
+   UpdateDashboardPro(balance, equity, profit, spread, trades, lots, winrate, dailyPL, statut, "");
    // -------- FIN DU BLOC DASHBOARD PRO --------
 
    if(dashboard_needs_update)
-      UpdateDashboard();
+    {
+      //UpdateDashboard(); // Décommente si tu utilises une mise à jour séparée
+      dashboard_needs_update = false;
+    }
   }
-
-// Timer pour rafraîchir dashboard
-void OnTimer()
-  {
-   dashboard_needs_update = true;
-  }
-
 // Trade : update dashboard après chaque trade
 void OnTrade()
   {
@@ -928,14 +940,14 @@ void OnChartEvent(const int id,
    if(id == CHARTEVENT_OBJECT_CLICK)
      {
       string btn = sparam;
-      if(btn == "btn_fullclose")
+      if(btn == "dashboard_FullCloseBtn")
         {
          full_close_triggered = true;
+         dashboard_needs_update = true; // optionnel, selon gestion de ton EA
         }
       // Ajoute ici si besoin le bouton "pause" plus tard
      }
   }
-
 // Transaction : update stats, wins, losses après trade
 void OnTradeTransaction(
    const MqlTradeTransaction &trans,
