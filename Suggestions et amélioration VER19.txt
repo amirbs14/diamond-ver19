@@ -1,0 +1,519 @@
+5. Contrôle de l’effet boule de neige (martingale, pyramidalisation)
+Évite toute logique de "moyenne à la baisse" ou d’augmentation de taille de lot après une perte.
+Si tu utilises Grid ou Martingale, limite strictement le nombre de positions et le facteur d’augmentation.
+
+6. Ajoute un système de coupe-circuit
+Si drawdown > 30% en une journée, stoppe l’EA.
+Si perte > X $ en une journée, stoppe l’EA.
+Cela évite la ruine totale en cas de bug ou de marché anormal.
+
+2. Money Management et Risque
+Taille du lot adaptée au capital
+→ Commence par 0.01 lot par 1000$ de capital, ou moins si drawdown élevé.
+
+Stop Loss toujours en place
+→ Le SL doit être raisonnable, jamais trop large :
+
+Pour USDJPY, 20 à 50 pips max (0.2 à 0.5 en prix).
+Take Profit vs Stop Loss
+→ Un TP trop grand ou trop petit par rapport au SL peut accélérer les pertes.
+
+Nombre de positions ouvertes simultanément
+→ Limite-en le nombre.
+
+
+4. Sécurité et Robustesse
+Vérifie que le SL est toujours posé et cohérent.
+Vérifie que tu ne trades pas pendant des heures à très haut spread (trading nocturne sur USDJPY par ex).
+Ajoute un filtre de volatilité ou une limitation de nombre de trades par heure/jour.
+
+
+7. Exemple de patch pour Money Management
+MQL5
+double GetLotSize(double riskPerTradePercent, double stopLossPips) {
+   double accountRisk = AccountBalance() * riskPerTradePercent / 100.0;
+   double pipValue = MarketInfo(_Symbol, MODE_TICKVALUE) * 10; // pour USDJPY
+   double lotSize = accountRisk / (stopLossPips * pipValue);
+   lotSize = MathMax(lotSize, 0.01); // mini 0.01 lot
+   return NormalizeDouble(lotSize, 2);
+}
+
+9. Recapitulatif pour USDJPY
+Spread cible (max) : 1.5 à 2 pips (0.015 à 0.02)
+Stop Loss typique : 0.2 à 0.4
+Take Profit typique : 0.4 à 1.0
+ATR multiplier : 1.5
+Lot size : 0.01 à 0.1 / 1000$
+Max positions : 1 à 3
+Filtre volatilité/horaires
+Coupe-circuit drawdown
+
+ les mesures de sécurité dans mon Ea et les conditions d'd'arr^ter l'EA de trader et faire une pause et aussi si jamais y a 3 ou 5 pertes succéssives normalement 
+ l'Ea doit stopper pour 30 min ou que la pair perd 1.5% ou 3% du capital on arrêtte de trader sur cette pair y a t'il tout ça dans mon EA? si je me rappelle bien 
+ et ya a t'il pondération et scoring pour les stratégies
+ 
+ A. Stop après pertes consécutives
+Cherche des variables ou fonctions du type :
+
+consecutiveLosses, lossStreak, maxConsecutiveLosses, lossCount
+une logique de type :
+MQL5
+if(consecutiveLosses >= 3) { ... stop trading ... }
+B. Stop après drawdown sur une paire
+Variables : pairDrawdown, maxPairDrawdown, ou calcul du drawdown par symbole
+Logique du type :
+MQL5
+if(pairDrawdown >= 0.015*AccountBalance()) { ... stop trading ... }
+C. Pause temporaire
+Variables : pauseUntil, nextTradeTime, lastLossTime, etc.
+Logique du type :
+MQL5
+if(TimeCurrent() < pauseUntil) return; // pas de trade pendant la pause
+D. Scoring/Pondération des stratégies
+Recherche des variables comme : strategyScore, signalWeight, score, weight
+Logique avec des tableaux de scores ou des coefficients appliqués à des stratégies
+
+
+4. Résumé — Ce que tu cherches
+STOP après 3 ou 5 pertes consécutives : recherche d’un compteur et d’une pause
+STOP si drawdown > 1.5% ou 3% pour une paire : recherche d’un calcul de pertes par symbole
+PAUSE de 30 min après pertes : recherche d’une variable de temps ou d’un timer
+Pondération/scoring de stratégies : recherche de scores, weights, ou coefficients de décision par stratégie
+
+1. Sécurité et Gestion du Risque
+a) Limite de pertes quotidiennes
+Paramètre : input double MaxDailyLossPercent = 3.0;
+Logique : Dans la classe CRiskManager, méthode IsTradeAllowed(), si la perte quotidienne dépasse ce seuil, l’EA arrête de trader et peut envoyer une notification.
+b) Limite de pertes consécutives
+Paramètre : input int MaxConsecutiveLosses = 5;
+Pause automatique : Après un certain nombre de pertes consécutives (PauseAfterLosses), une pause de trading est imposée (PauseDurationMinutes).
+Géré dans : CRiskManager → UpdateTradeResult() et IsTradeAllowed()
+c) Pause automatique après pertes
+Paramètres : PauseAfterLosses, PauseDurationMinutes
+Le robot se met en pause X minutes après X pertes consécutives (configurable).
+d) Gestion du drawdown
+Limite sur la perte quotidienne en pourcentage du solde : voir a) (drawdown global/journalier).
+Pas de gestion directe du drawdown par trade ou par paire, mais la logique peut s’y apparenter.
+e) Contrôle du nombre de positions et du temps entre trades
+Max positions par symbole : #define MAX_POSITIONS_PER_SYMBOL 3
+Délai entre deux trades : input int MinMinutesBetweenTrades = 5;
+2. Scoring et pondération des stratégies
+Structure SStrategyPerformance pour chaque stratégie, avec :
+Nombre de trades, wins, losses, profit, winrate, profit factor, activation/désactivation automatique, “weight” (pondération).
+Auto-désactivation d’une stratégie si son winrate descend sous un certain seuil (MinWinRateToDisable) après un nombre minimal de trades (MinTradesToDisable).
+Réactivation automatique après X heures (ReEnableAfterHours).
+Pondération automatique via UpdateStrategyWeights() (fonction appelée dans le timer).
+3. Trailing Stop et Money Management
+Trailing stop dynamique basé sur ATR : EnableTrailingStop, TrailingStopATRMultiplier
+Calcul du lot en fonction du risque et du stop (risk management strict) : CalculatePositionSize(), avec bornes min et max.
+4. Validation stricte de tous les ordres (SL, TP, distance min/max, spread, etc.)
+Tous les ordres sont validés (fonction ValidateTrade) :
+Distance SL/entrée conforme à l’ATR, bornée
+Prix cohérents
+Spread contrôlé
+Filtre temporel
+Validation spécifique USDJPY pour le spread
+5. Notifications
+Système de notifications Telegram/email lors de pause, perte max, ouverture trade, etc.
+Conclusion
+Ton EA contient bien :
+
+Stop trading après pertes consécutives ou drawdown journalier
+Gestion automatique des pauses et notifications
+Scoring/désactivation/réactivation automatique des stratégies selon leur perf
+Contrôle du money management, trailing stop ATR, validation stricte de chaque trade
+Si tu veux un détail ligne par ligne sur une partie précise (ex : comment la pause est imposée, ou comment le scoring fonctionne), précise-le et je t’explique la logique ou je donne un extrait commenté.
+Tu peux aussi demander un audit sur un paramètre particulier (drawdown par paire ? scoring ? etc.).
+
+You said: je veux aussi me concentrer sur les
+je veux aussi me concentrer sur les sorties partielles échelonnées je t'expliquerai comment si jamais un trade avec un lot 0.5 réalise un Tp de 15 à 25 % il récupère 50% du lot (trade) si jamais ya SL >50% atteint alors il sort carrément tu as compris?
+Copilot said: Oui, j’ai bien compris ta demande pour
+Oui, j’ai bien compris ta demande pour la gestion des sorties partielles échelonnées :
+
+Si un trade de lot 0.5 atteint un Take Profit (TP) compris entre 15% et 25% de gain :
+→ Tu veux clôturer 50% de la position (donc 0.25 lot), et laisser courir le reste.
+
+Si la perte atteint plus de 50% du Stop Loss (SL) :
+→ Tu veux clôturer la totalité de la position restante (sortie complète).
+
+Résumé visuel
+Condition	Action
+Gain entre +15% et +25% de la position	Fermer 50% du lot
+Perte > 50% du SL	Tout fermer (sortie totale)
+À valider :
+Base de calcul : c’est bien le gain ou la perte par rapport au montant du SL initial (et non du capital) ?
+Clôture partielle : tu veux que l’EA utilise la fonction de clôture partielle (ex : PositionClosePartial ou équivalent) ?
+Si plusieurs Take Profits : on fait 1 seule sortie partielle ou plusieurs niveaux ?
+
+1. Sorties partielles échelonnées (TP/SL dynamique)
+Si TP atteint +15% à +25% du profit cible → clôturer 50% du lot (fonction partielle)
+Si perte atteint -50% du SL → clôture totale de la position
+2. Sécurité : déjà présent, à renforcer
+Blocage automatique en cas de perte journalière ou pertes consécutives
+Filtre de spread, volatilité, nombre de positions, temps entre trades
+Validation stricte de chaque ordre (prix, SL/TP, distances min/max)
+Notifications systématiques
+3. Performance : scoring et pondération dynamique
+Scoring automatique de chaque stratégie et désactivation si sous-perf
+Pondération dynamique (weight) selon résultats réels
+Réactivation automatique après X heures
+4. Money management avancé
+Taille de lot calculée dynamiquement, bornée (min/max), adaptée au risque
+Trailing stop dynamique basé sur ATR, configurable
+5. Audit/Logs
+Sauvegarde régulière des performances, logs détaillés, enregistrement CSV des signaux
+Proposition technique pour la sortie partielle (exemple de code MQL5)
+À ajouter dans ta fonction de gestion des positions (ex : ManagePositions) :
+
+
+DIAMOND_VER_19_STOP_OK.mq5
+void ManagePartialExits()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if(!PositionSelectByTicket(PositionGetTicket(i))) continue;
+        if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+À appeler à chaque tick (juste avant/juste après la gestion normale des positions).
+Adapte les seuils à tes besoins (ex : 0.15 → 15%, 0.25 → 25%, -0.5 → -50%).
+Étape suivante
+Intégrer cette logique dans ton EA (fichier principal)
+
+ le dashboard est vétuste null je veux un affichage pro affichant les noms des stratégies et leurs valeur (win rate nombre de trades gagnant et perdant ) pour chaque stratégie aussi si jamais y a une stratégie désactivé tu l'afficheras en rouge sinon par défaut c'est le blanc aussi je veux que tu m'affiche dans le panneau opaque bleu foncé les résultats des statistiques ( Pair time frame  balance equity niombre de trades total journalier nombre de trades gagnants et perdants et le Profit / Loss et le win rate etc) tout ce qui est profit en vert et tout ce qui est perte en orange
+ 
+ Sorties partielles échelonnées (TP intermédiaire +15%/+25% = close partiel à 50%, perte >50% SL = close total)
+Nouveau dashboard graphique PRO :
+Affichage des stratégies avec leurs stats (win rate, trades gagnants/perdants, nom)
+Stratégie désactivée = nom en rouge, sinon en blanc
+Panneau opaque bleu foncé avec : paire, timeframe, balance, equity, nb trades totaux/journaliers, nb trades gagnants/perdants, Profit/Loss, winrate, etc.
+Profits en vert, pertes en orange
+Je vais :
+
+Générer la fonction de gestion des sorties partielles et l’intégrer exactement dans ton code de base.
+Ajouter (ou remplacer) la fonction de dashboard graphique MQL5 (via objets graphiques, couleurs, etc.) en respectant tes couleurs et stats demandées.
+
+// Exemple pour créer un rectangle bleu foncé opaque en haut à gauche du graphique
+string DASHBOARD_BG = "DASHBOARD_BG";
+int left = 5, top = 30, width = 440, height = 260;
+color bgColor = clrDarkBlue; // ou use ColorToARGB(clrBlue, 255) pour un bleu plus vif
+
+if (ObjectFind(0, DASHBOARD_BG) < 0)
+    ObjectCreate(0, DASHBOARD_BG, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+
+ObjectSetInteger(0, DASHBOARD_BG, OBJPROP_XDISTANCE, left);
+ObjectSetInteger(0, DASHBOARD_BG, OBJPROP_YDISTANCE, top);
+ObjectSetInteger(0, DASHBOARD_BG, OBJPROP_XSIZE, width);
+ObjectSetInteger(0, DASHBOARD_BG, OBJPROP_YSIZE, height);
+ObjectSetInteger(0, DASHBOARD_BG, OBJPROP_COLOR, bgColor);
+ObjectSetInteger(0, DASHBOARD_BG, OBJPROP_BACK, false); // devant les bougies !
+ObjectSetInteger(0, DASHBOARD_BG, OBJPROP_CORNER, 0);
+ObjectSetInteger(0, DASHBOARD_BG, OBJPROP_SELECTABLE, false);
+ObjectSetInteger(0, DASHBOARD_BG, OBJPROP_HIDDEN, true);
+
+// ... [tout le code existant au-dessus est inchangé]
+
+// === DASHBOARD GRAPHIQUE PRO OPAQUE (bleu foncé, haut gauche, stats, stratégies) ===
+void UpdateDashboard()
+{
+   string DASH_BG = "DASHBOARD_BG";
+   int left = 5, top = 30, width = 440, height = 260;
+   color bgColor = ColorToARGB(clrDarkBlue,255);
+   ObjectCreate(0, DASH_BG, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, DASH_BG, OBJPROP_XDISTANCE, left);
+   ObjectSetInteger(0, DASH_BG, OBJPROP_YDISTANCE, top);
+   ObjectSetInteger(0, DASH_BG, OBJPROP_XSIZE, width);
+   ObjectSetInteger(0, DASH_BG, OBJPROP_YSIZE, height);
+   ObjectSetInteger(0, DASH_BG, OBJPROP_COLOR, bgColor);
+   ObjectSetInteger(0, DASH_BG, OBJPROP_BACK, false); // Devant les bougies
+   ObjectSetInteger(0, DASH_BG, OBJPROP_CORNER, 0);
+   ObjectSetInteger(0, DASH_BG, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, DASH_BG, OBJPROP_HIDDEN, true);
+
+   int text_y = top+10, text_x = left+12, line_step = 26;
+   string dash_prefix = "DASH_";
+   int i = 0;
+
+   // Affichage des stratégies
+   for(int s=0; s<STRATEGY_COUNT; s++) {
+      string stratName = EnumToString(strategyPerformance[s].strategy);
+      string stratObj = dash_prefix+"STRAT_"+IntegerToString(s);
+      string colorTxt = (strategyPerformance[s].enabled ? "White" : "Red");
+      color colTxt = strategyPerformance[s].enabled ? clrWhite : clrRed;
+      string l = stratName + " | WinRate: " + DoubleToString(strategyPerformance[s].winRate*100,1) + "% | Gagnants: " +
+                 IntegerToString(strategyPerformance[s].wins) + " | Perdants: " + IntegerToString(strategyPerformance[s].losses);
+      DrawLabel(stratObj, l, text_x, text_y + i*line_step, colTxt, 14, 0);
+      i++;
+   }
+
+   text_y += (i+1)*line_step;
+
+   // Stats globales du compte
+   double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   int wins=0, losses=0, total=0;
+   for(int k=0; k<STRATEGY_COUNT; k++) { wins += strategyPerformance[k].wins; losses += strategyPerformance[k].losses; total += strategyPerformance[k].totalTrades;}
+   double profit = eq - bal;
+   double winrate = (total>0) ? (double)wins/total*100.0 : 0.0;
+
+   string dashStats = "PAIR: "+_Symbol+" | TF: "+EnumToString(_Period)+" | Balance: "+DoubleToString(bal,2)+" | Equity: "+DoubleToString(eq,2);
+   DrawLabel(dash_prefix+"STATS1", dashStats, text_x, text_y, clrWhite, 12, 0); text_y+=line_step;
+   string dashStats2 = "Trades: "+IntegerToString(total)+" | Gagnants: "+IntegerToString(wins)+" | Perdants: "+IntegerToString(losses)+
+                       " | Winrate: "+DoubleToString(winrate,1)+"%";
+   DrawLabel(dash_prefix+"STATS2", dashStats2, text_x, text_y, clrWhite, 12, 0); text_y+=line_step;
+   string dashProfit = "Profit/Loss: "+DoubleToString(profit,2);
+   DrawLabel(dash_prefix+"PROFIT", dashProfit, text_x, text_y, profit>=0?clrLime:clrOrange, 14, 0);
+
+   // Nettoyage des labels inutilisés
+   for(int j=STRATEGY_COUNT; j<10; j++) ObjectDelete(0, dash_prefix+"STRAT_"+IntegerToString(j));
+}
+void DrawLabel(string name, string txt, int x, int y, color clr, int size, int fontw=FW_NORMAL)
+{
+   if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,name,OBJPROP_CORNER,0);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,size);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+   ObjectSetString(0,name,OBJPROP_TEXT,txt);
+}
+// Appeler UpdateDashboard() dans OnTick et OnTimer (déjà dans ton code !)
+
+
+// === SORTIES PARTIELLES TP/SL ===
+// Appelle cette fonction dans ta gestion des positions, par exemple dans ManagePositions() ou OnTick()
+void CheckPartialClose()
+{
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      double cur = (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double maxVol = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+      double minVol = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+
+      // TP partiel à +15% ou +25% de gain
+      double perc1 = 0.15, perc2 = 0.25;
+      double tp1 = open + (tp-open)*perc1*((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1);
+      double tp2 = open + (tp-open)*perc2*((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1);
+
+      // Si TP1 atteint et volume assez grand
+      if(((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY && cur>=tp1) ||
+          (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_SELL && cur<=tp1)) && vol>minVol*1.5)
+      {
+         double partVol = NormalizeDouble(vol*0.5,2);
+         if(partVol>=minVol) trade.PositionClosePartial(ticket,partVol);
+      }
+      // Si TP2 atteint et volume assez grand
+      if(((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY && cur>=tp2) ||
+          (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_SELL && cur<=tp2)) && vol>minVol*1.2)
+      {
+         double partVol = NormalizeDouble(vol*0.5,2);
+         if(partVol>=minVol) trade.PositionClosePartial(ticket,partVol);
+      }
+      // SL: close total si perte >50%
+      double lossLim = (open-sl)*0.5;
+      if(((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY && cur<=open-lossLim) ||
+          (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_SELL && cur>=open+lossLim)) && vol>=minVol)
+      {
+         trade.PositionClose(ticket);
+      }
+   }
+}
+
+// Appelle CheckPartialClose(); dans OnTick() et/ou juste après ManagePositions()
+
+// ... [fin du fichier]
+
+//+------------------------------------------------------------------+
+//|                                                      DIAMOND VER 19 STOP OK.mq5 |
+//|               ... TON CODE ORIGINAL ICI ... (lignes 1 à N)       |
+//+------------------------------------------------------------------+
+
+
+// ==================================================================
+// =============== AJOUTS DASHBOARD GRAPHIQUE PRO ===================
+// ==================================================================
+
+// --- Structures pour les performances des stratégies ---
+struct StrategyPerformance
+  {
+    int strategy;
+    bool enabled;
+    int wins;
+    int losses;
+    int totalTrades;
+    double winRate;
+  };
+#define STRATEGY_COUNT 4
+StrategyPerformance strategyPerformance[STRATEGY_COUNT];
+
+// --- Fonctions Dashboard ---
+void DrawLabel(string name, string txt, int x, int y, color clr, int size, int fontw=FW_NORMAL)
+  {
+    if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+    ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+    ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+    ObjectSetInteger(0,name,OBJPROP_CORNER,0);
+    ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
+    ObjectSetInteger(0,name,OBJPROP_FONTSIZE,size);
+    ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+    ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+    ObjectSetString(0,name,OBJPROP_TEXT,txt);
+  }
+
+void UpdateDashboard()
+  {
+    string DASH_BG = "DASHBOARD_BG";
+    int left = 5, top = 30, width = 440, height = 260;
+    color bgColor = ColorToARGB(clrDarkBlue,255);
+    if(ObjectFind(0, DASH_BG) < 0)
+      ObjectCreate(0, DASH_BG, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, DASH_BG, OBJPROP_XDISTANCE, left);
+    ObjectSetInteger(0, DASH_BG, OBJPROP_YDISTANCE, top);
+    ObjectSetInteger(0, DASH_BG, OBJPROP_XSIZE, width);
+    ObjectSetInteger(0, DASH_BG, OBJPROP_YSIZE, height);
+    ObjectSetInteger(0, DASH_BG, OBJPROP_COLOR, bgColor);
+    ObjectSetInteger(0, DASH_BG, OBJPROP_BACK, false); // Devant les bougies
+    ObjectSetInteger(0, DASH_BG, OBJPROP_CORNER, 0);
+    ObjectSetInteger(0, DASH_BG, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, DASH_BG, OBJPROP_HIDDEN, true);
+
+    int text_y = top+10, text_x = left+12, line_step = 26;
+    string dash_prefix = "DASH_";
+    int i = 0;
+
+    // Affichage des stratégies
+    for(int s=0; s<STRATEGY_COUNT; s++) {
+      string stratName = EnumToString(strategyPerformance[s].strategy);
+      string stratObj = dash_prefix+"STRAT_"+IntegerToString(s);
+      color colTxt = strategyPerformance[s].enabled ? clrWhite : clrRed;
+      string l = stratName + " | WinRate: " + DoubleToString(strategyPerformance[s].winRate*100,1) + "% | Gagnants: " +
+                 IntegerToString(strategyPerformance[s].wins) + " | Perdants: " + IntegerToString(strategyPerformance[s].losses);
+      DrawLabel(stratObj, l, text_x, text_y + i*line_step, colTxt, 14, 0);
+      i++;
+    }
+    text_y += (i+1)*line_step;
+
+    // Stats globales du compte
+    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+    double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+    int wins=0, losses=0, total=0;
+    for(int k=0; k<STRATEGY_COUNT; k++) { wins += strategyPerformance[k].wins; losses += strategyPerformance[k].losses; total += strategyPerformance[k].totalTrades;}
+    double profit = eq - bal;
+    double winrate = (total>0) ? (double)wins/total*100.0 : 0.0;
+
+    string dashStats = "PAIR: "+_Symbol+" | TF: "+EnumToString(_Period)+" | Balance: "+DoubleToString(bal,2)+" | Equity: "+DoubleToString(eq,2);
+    DrawLabel(dash_prefix+"STATS1", dashStats, text_x, text_y, clrWhite, 12, 0); text_y+=line_step;
+    string dashStats2 = "Trades: "+IntegerToString(total)+" | Gagnants: "+IntegerToString(wins)+" | Perdants: "+IntegerToString(losses)+
+                        " | Winrate: "+DoubleToString(winrate,1)+"%";
+    DrawLabel(dash_prefix+"STATS2", dashStats2, text_x, text_y, clrWhite, 12, 0); text_y+=line_step;
+    string dashProfit = "Profit/Loss: "+DoubleToString(profit,2);
+    DrawLabel(dash_prefix+"PROFIT", dashProfit, text_x, text_y, profit>=0?clrLime:clrOrange, 14, 0);
+
+    // Nettoyage des labels inutilisés
+    for(int j=STRATEGY_COUNT; j<10; j++) ObjectDelete(0, dash_prefix+"STRAT_"+IntegerToString(j));
+  }
+
+// ==================================================================
+// ============= FIN AJOUTS DASHBOARD GRAPHIQUE PRO =================
+// ==================================================================
+
+
+// ==================================================================
+// =========== AJOUT SORTIES PARTIELLES TP/SL =======================
+// ==================================================================
+// A appeler dans OnTick() ou dans ta gestion de positions
+void CheckPartialClose()
+  {
+    for(int i=PositionsTotal()-1; i>=0; i--)
+    {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      double open = PositionGetDouble(POSITION_PRICE_OPEN);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      double cur = (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol,SYMBOL_BID) : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double maxVol = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+      double minVol = SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+
+      // TP partiel à +15% ou +25% de gain
+      double perc1 = 0.15, perc2 = 0.25;
+      double tp1 = open + (tp-open)*perc1*((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1);
+      double tp2 = open + (tp-open)*perc2*((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1);
+
+      // Si TP1 atteint et volume assez grand
+      if(((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY && cur>=tp1) ||
+          (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_SELL && cur<=tp1)) && vol>minVol*1.5)
+      {
+         double partVol = NormalizeDouble(vol*0.5,2);
+         if(partVol>=minVol) trade.PositionClosePartial(ticket,partVol);
+      }
+      // Si TP2 atteint et volume assez grand
+      if(((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY && cur>=tp2) ||
+          (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_SELL && cur<=tp2)) && vol>minVol*1.2)
+      {
+         double partVol = NormalizeDouble(vol*0.5,2);
+         if(partVol>=minVol) trade.PositionClosePartial(ticket,partVol);
+      }
+      // SL: close total si perte >50%
+      double lossLim = (open-sl)*0.5;
+      if(((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY && cur<=open-lossLim) ||
+          (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_SELL && cur>=open+lossLim)) && vol>=minVol)
+      {
+         trade.PositionClose(ticket);
+      }
+    }
+  }
+// ==================================================================
+// =========== FIN SORTIES PARTIELLES TP/SL =========================
+// ==================================================================
+
+
+// --- FIN DU BLOC 1/...
+
+
+// ... Suite de ton code original ... 
+// Ici se poursuit le code de ton EA, toutes tes fonctions, classes, protections, etc.
+// Rien n'est supprimé : toutes tes stratégies, la gestion des ordres, money management, 
+// la logique du trading, les buffers, indicateurs, etc. sont conservés.
+
+// IMPORTANT : 
+// Intègre les appels à UpdateDashboard(); et CheckPartialClose(); dans OnTick() et OnTimer (ou dans ta boucle principale) :
+
+void OnTick()
+  {
+    // ... (ton code existant de gestion des signaux, des positions, etc.) ...
+    
+    // === AJOUTS pour dashboard et sorties partielles ===
+    UpdateDashboard();
+    CheckPartialClose();
+  }
+
+void OnTimer()
+  {
+    // ... (si tu as déjà un OnTimer pour refresh l'affichage ou autre) ...
+    UpdateDashboard();
+    // (CheckPartialClose n'est utile que sur OnTick, mais tu peux l'ajouter si besoin)
+  }
+
+// ... Le reste de ton EA continue ici ...
+// Ta gestion de la journalisation, des paramètres, du money management, etc.
+
+// FIN DU BLOC 2/…
+
+// ... Fin de ton code original ...
+// Toutes tes fonctions utilitaires, protections, gestion de l'arrêt, logs, etc. sont conservées.
+
+
+//+------------------------------------------------------------------+
+//|                   FIN DU FICHIER DIAMOND VER 19 STOP OK.mq5      |
+//+------------------------------------------------------------------+
+
