@@ -1,0 +1,966 @@
+//+------------------------------------------------------------------+
+//|                 DIAMOND PRO v21 - Copilot x amirbs14             |
+//|         Version améliorée - Sécurité, Dashboard, Stats           |
+//|         Prêt à compiler MQL5 - Juin 2025                         |
+//+------------------------------------------------------------------+
+#property copyright "amirbs14 / Copilot"
+#property version   "21.0"
+#property strict
+
+#include <Trade\Trade.mqh>
+#include <ChartObjects\ChartObjectsTxtControls.mqh>
+
+//-------------------- Couleurs Spéciales ---------------------------
+#define COLOR_ACTIVE clrWhite
+#define COLOR_INACTIVE clrRed
+#define COLOR_LABEL clrGold
+#define COLOR_STAT_POS clrLime
+#define COLOR_STAT_NEG clrRed
+#define COLOR_STAT_NEUTRAL clrAqua
+#define COLOR_WINRATE clrYellow
+#define COLOR_DASH_BG clrDarkSlateGray
+
+//-------------------- Inputs (externes) ----------------------------
+input double   Lots               = 0.01;
+input double   RiskPercent        = 2.0;
+input int      StopLoss           = 350;
+input int      TakeProfit         = 350;
+input int      Slippage           = 5;
+input int      MagicNumber        = 20250612;
+input bool     UseTrailingStop    = true;
+input int      TrailingStop       = 100;
+input int      TrailingStep       = 25;
+input int      PartialClose1      = 100;
+input int      PartialClose2      = 200;
+input double   PartialLot1        = 0.5;
+input double   PartialLot2        = 0.25;
+input bool     EnableFullClose    = true;
+input string   GoldSymbol         = "XAUUSD";
+input int      DashboardPosX      = 30;
+input int      DashboardPosY      = 30;
+input int      DashboardWidth     = 510;
+input int      DashboardHeight    = 320;
+
+//-------------------- Structures & Types ---------------------------
+struct StrategyStats
+  {
+   string Name;
+   bool   Enabled;
+   int    TotalTrades;
+   int    Wins;
+   int    Losses;
+   double Profit;
+   double WinRate;
+   color  StatusColor;
+  };
+
+struct DailyStats
+  {
+   datetime Day;
+   double   Profit;
+   int      Trades;
+   int      Wins;
+   int      Losses;
+   double   MaxDrawdown;
+  };
+
+//-------------------- Variables Globales ---------------------------
+CTrade trade;
+
+int     strategies_total    = 0;
+StrategyStats strategies[]; // tableau dynamique
+DailyStats    day_stats[];  // tableau dynamique
+
+bool    dashboard_needs_update = false;
+int     dashboard_handle   = -1;
+string  symbol_main           = "";
+bool    is_gold               = false;
+ulong   last_buy_ticket       = 0;
+ulong   last_sell_ticket      = 0;
+bool    full_close_triggered  = false;
+bool    allow_sound           = false;
+string  last_error            = "";
+
+int     handle_ma_fast        = INVALID_HANDLE;
+int     handle_ma_slow        = INVALID_HANDLE;
+int     handle_atr            = INVALID_HANDLE;
+int     handle_rsi            = INVALID_HANDLE;
+int     handle_macd           = INVALID_HANDLE;
+int     handle_bbands         = INVALID_HANDLE;
+
+double  buffer_ma_fast[];
+double  buffer_ma_slow[];
+double  buffer_atr[];
+double  buffer_rsi[];
+double  buffer_macd_main[];
+double  buffer_macd_signal[];
+double  buffer_bbands_upper[];
+double  buffer_bbands_middle[];
+double  buffer_bbands_lower[];
+
+double  buy_signal            = 0.0;
+double  sell_signal           = 0.0;
+double  calc_lot              = 0.01;
+
+bool    ea_active             = true; // Statut général (pause/actif)
+
+//-------------------- Prototypes Fonctions Principales --------------
+void     InitGlobalVars();
+void     CheckGoldSymbol();
+void     InitializeIndicators();
+void     UpdateIndicators();
+double   CalcDynamicLot(double risk, double balance, double sl_pips, double min_lot, double max_lot);
+void     ExecuteStrategies();
+void     UpdateDashboard();
+void     DeleteDashboardPro();
+void     DrawDashboardHeader();
+void     DrawDashboardStats();
+void     DrawDashboardDaily();
+void     DrawDashboardStrats();
+void     DrawDashboardButton();
+void     DrawDashboardStatus();
+void     DrawDashboardSpread();
+int      CountOpenPositions(ENUM_POSITION_TYPE posType);
+void     FullCloseAll();
+void     PartialCloseManager();
+void     TrailingStopManager();
+void     UpdateDailyStatsAfterTrade(double profit, bool win);
+void     ResetAll();
+datetime DateOfDay(datetime t);
+void     OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result);
+void     strategies_total_init();
+void     ShowError(string msg);
+
+//-------------------- Sécurisation des appels trading ----------------
+#define TRADE_SAFE_CALL(_call)       \
+  {                                  \
+    if(!(_call))                     \
+      {                              \
+        last_error = trade.ResultRetcodeDescription(); \
+        ShowError(last_error);       \
+      }                              \
+    else                             \
+      last_error = "";               \
+  }                                  
+  
+  // ======================= INITIALISATION & OUTILS =========================
+
+// Initialise toutes les variables globales
+void InitGlobalVars()
+  {
+   strategies_total = 0;
+   ArrayResize(strategies,10);
+   ArrayResize(day_stats,50);
+   dashboard_needs_update = true;
+   dashboard_handle = -1;
+   last_buy_ticket = 0;
+   last_sell_ticket = 0;
+   full_close_triggered = false;
+   allow_sound = false;
+   last_error = "";
+   symbol_main = _Symbol;
+   is_gold = false;
+   calc_lot = Lots;
+   ea_active = true;
+  }
+
+// Détection automatique GOLD
+void CheckGoldSymbol()
+  {
+   string name = _Symbol;
+   StringToUpper(name);
+   if(StringFind(name,"XAU")>=0 || StringFind(name,"GOLD")>=0)
+     {
+      is_gold = true;
+      symbol_main = _Symbol;
+     }
+   else if(GoldSymbol!="" && SymbolInfoInteger(GoldSymbol,SYMBOL_SELECT))
+     {
+      is_gold = true;
+      symbol_main = GoldSymbol;
+     }
+   else
+     {
+      is_gold = false;
+      symbol_main = _Symbol;
+     }
+  }
+
+// Initialisation des indicateurs
+void InitializeIndicators()
+  {
+   int bars = Bars(symbol_main,PERIOD_CURRENT);
+   handle_ma_fast = iMA(symbol_main, PERIOD_CURRENT, 10, 0, MODE_SMA, PRICE_CLOSE);
+   ArrayResize(buffer_ma_fast,bars);
+   handle_ma_slow = iMA(symbol_main, PERIOD_CURRENT, 20, 0, MODE_SMA, PRICE_CLOSE);
+   ArrayResize(buffer_ma_slow,bars);
+   handle_atr = iATR(symbol_main, PERIOD_CURRENT, 14);
+   ArrayResize(buffer_atr,bars);
+   handle_rsi = iRSI(symbol_main, PERIOD_CURRENT, 14, PRICE_CLOSE);
+   ArrayResize(buffer_rsi,bars);
+   handle_macd = iMACD(symbol_main, PERIOD_CURRENT, 12, 26, 9, PRICE_CLOSE);
+   ArrayResize(buffer_macd_main,bars);
+   ArrayResize(buffer_macd_signal,bars);
+   handle_bbands = iBands(symbol_main, PERIOD_CURRENT, 20, 2, 0, PRICE_CLOSE);
+   ArrayResize(buffer_bbands_upper,bars);
+   ArrayResize(buffer_bbands_middle,bars);
+   ArrayResize(buffer_bbands_lower,bars);
+  }
+
+// Mise à jour des buffers d'indicateurs
+void UpdateIndicators()
+  {
+   int bars = Bars(symbol_main,PERIOD_CURRENT);
+   if(handle_ma_fast!=INVALID_HANDLE)
+      CopyBuffer(handle_ma_fast,0,0,bars,buffer_ma_fast);
+   if(handle_ma_slow!=INVALID_HANDLE)
+      CopyBuffer(handle_ma_slow,0,0,bars,buffer_ma_slow);
+   if(handle_atr!=INVALID_HANDLE)
+      CopyBuffer(handle_atr,0,0,bars,buffer_atr);
+   if(handle_rsi!=INVALID_HANDLE)
+      CopyBuffer(handle_rsi,0,0,bars,buffer_rsi);
+   if(handle_macd!=INVALID_HANDLE)
+     {
+      CopyBuffer(handle_macd,0,0,bars,buffer_macd_main);
+      CopyBuffer(handle_macd,1,0,bars,buffer_macd_signal);
+     }
+   if(handle_bbands!=INVALID_HANDLE)
+     {
+      CopyBuffer(handle_bbands,0,0,bars,buffer_bbands_upper);
+      CopyBuffer(handle_bbands,1,0,bars,buffer_bbands_middle);
+      CopyBuffer(handle_bbands,2,0,bars,buffer_bbands_lower);
+     }
+  }
+
+// ========================= CALCUL DU LOT SÉCURISÉ =========================
+double CalcDynamicLot(double risk, double balance, double sl_pips, double min_lot, double max_lot)
+  {
+   // Respecte la règle : 0.01 à 0.5 lot max par 1000$
+   double lot_step   = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_STEP);
+   double equity     = (balance > 0 ? balance : AccountInfoDouble(ACCOUNT_EQUITY));
+   double allowed_max = MathMin(0.5 * MathFloor(equity/1000.0), max_lot);
+   double tick_value = SymbolInfoDouble(symbol_main, SYMBOL_TRADE_TICK_VALUE);
+   double tick_size  = SymbolInfoDouble(symbol_main, SYMBOL_TRADE_TICK_SIZE);
+   double pip_value  = tick_value / tick_size;
+   double risk_money = equity * risk/100.0;
+
+   if(sl_pips <= 0.0) sl_pips = 200.0;
+   if(pip_value <= 0.0) pip_value = 1.0;
+
+   double lot = NormalizeDouble(risk_money/(sl_pips*pip_value),2);
+
+   if(lot < min_lot) lot = min_lot;
+   if(lot > allowed_max) lot = allowed_max;
+   lot = MathFloor(lot/lot_step)*lot_step;
+   if(lot > max_lot) lot = max_lot;
+   if(lot < min_lot) lot = min_lot;
+   return(lot);
+  }
+
+// ========================== SÉCURISATION DES STOPS =========================
+bool SecureStopLevel(double open_price, double stop, bool is_buy)
+  {
+   double level = SymbolInfoInteger(symbol_main, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   if(level <= 0) return true;
+   if(is_buy)
+     {
+      double min_stop = open_price - level;
+      if(stop < min_stop)
+        {
+         last_error = "Stop trop proche du prix pour BUY!";
+         ShowError(last_error);
+         return false;
+        }
+     }
+   else
+     {
+      double max_stop = open_price + level;
+      if(stop > max_stop)
+        {
+         last_error = "Stop trop proche du prix pour SELL!";
+         ShowError(last_error);
+         return false;
+        }
+     }
+   return true;
+  }
+
+// ========================= AFFICHAGE D'ERREUR =========================
+void ShowError(string msg)
+  {
+   Print("ERREUR: ",msg);
+   dashboard_needs_update = true;
+  }
+  
+
+  // ========================= STRATEGIES DE TRADING =========================
+
+// Initialisation des stratégies
+void strategies_total_init()
+  {
+   ArrayResize(strategies,10);
+   strategies_total = 0;
+
+   strategies[0].Name = "SMA Crossover";
+   strategies[0].Enabled = true;
+   strategies[0].TotalTrades = 0;
+   strategies[0].Wins = 0;
+   strategies[0].Losses = 0;
+   strategies[0].Profit = 0;
+   strategies[0].WinRate = 0;
+   strategies[0].StatusColor = COLOR_ACTIVE;
+   strategies_total++;
+
+   strategies[1].Name = "Breakout";
+   strategies[1].Enabled = true;
+   strategies[1].TotalTrades = 0;
+   strategies[1].Wins = 0;
+   strategies[1].Losses = 0;
+   strategies[1].Profit = 0;
+   strategies[1].WinRate = 0;
+   strategies[1].StatusColor = COLOR_ACTIVE;
+   strategies_total++;
+
+   strategies[2].Name = "RSI";
+   strategies[2].Enabled = true;
+   strategies[2].TotalTrades = 0;
+   strategies[2].Wins = 0;
+   strategies[2].Losses = 0;
+   strategies[2].Profit = 0;
+   strategies[2].WinRate = 0;
+   strategies[2].StatusColor = COLOR_ACTIVE;
+   strategies_total++;
+
+   strategies[3].Name = "MACD";
+   strategies[3].Enabled = true;
+   strategies[3].TotalTrades = 0;
+   strategies[3].Wins = 0;
+   strategies[3].Losses = 0;
+   strategies[3].Profit = 0;
+   strategies[3].WinRate = 0;
+   strategies[3].StatusColor = COLOR_ACTIVE;
+   strategies_total++;
+
+   strategies[4].Name = "BBands";
+   strategies[4].Enabled = true;
+   strategies[4].TotalTrades = 0;
+   strategies[4].Wins = 0;
+   strategies[4].Losses = 0;
+   strategies[4].Profit = 0;
+   strategies[4].WinRate = 0;
+   strategies[4].StatusColor = COLOR_ACTIVE;
+   strategies_total++;
+  }
+
+// Exécution des stratégies si EA actif
+void ExecuteStrategies()
+  {
+   if(!ea_active) return;
+   UpdateIndicators();
+   for(int i=0;i<strategies_total;i++)
+     {
+      if(!strategies[i].Enabled)
+        {
+         strategies[i].StatusColor = COLOR_INACTIVE;
+         continue;
+        }
+      else
+        strategies[i].StatusColor = COLOR_ACTIVE;
+
+      if(strategies[i].Name=="SMA Crossover") Strategy_Main(i);
+      else if(strategies[i].Name=="Breakout") Strategy_Breakout(i);
+      else if(strategies[i].Name=="RSI") Strategy_RSI(i);
+      else if(strategies[i].Name=="MACD") Strategy_MACD(i);
+      else if(strategies[i].Name=="BBands") Strategy_BBands(i);
+     }
+  }
+
+// SMA Crossover
+void Strategy_Main(int strat_index)
+  {
+   int bars = Bars(symbol_main,PERIOD_CURRENT);
+   if(bars<21) return;
+   if(buffer_ma_fast[0]>buffer_ma_slow[0] && buffer_ma_fast[1]<=buffer_ma_slow[1])
+     { buy_signal = 1; sell_signal = 0; }
+   else if(buffer_ma_fast[0]<buffer_ma_slow[0] && buffer_ma_fast[1]>=buffer_ma_slow[1])
+     { buy_signal = 0; sell_signal = 1; }
+   else { buy_signal = 0; sell_signal = 0; }
+   double ask = SymbolInfoDouble(symbol_main,SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbol_main,SYMBOL_BID);
+
+   double min_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MIN);
+   double max_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MAX);
+   double sl_pips = (StopLoss>0 ? StopLoss : 200);
+   if(handle_atr!=INVALID_HANDLE && ArraySize(buffer_atr)>0)
+      sl_pips = buffer_atr[0]*2;
+   double curr_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(buy_signal>0 && CountOpenPositions(POSITION_TYPE_BUY)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = ask - StopLoss * _Point;
+      double take = ask + TakeProfit * _Point;
+      if(!SecureStopLevel(ask, stop, true)) return;
+      TRADE_SAFE_CALL(trade.Buy(lot,symbol_main,ask,stop,take,"SMA Crossover BUY"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+   if(sell_signal>0 && CountOpenPositions(POSITION_TYPE_SELL)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = bid + StopLoss * _Point;
+      double take = bid - TakeProfit * _Point;
+      if(!SecureStopLevel(bid, stop, false)) return;
+      TRADE_SAFE_CALL(trade.Sell(lot,symbol_main,bid,stop,take,"SMA Crossover SELL"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+  }
+
+// Breakout
+void Strategy_Breakout(int strat_index)
+  {
+   int bars = Bars(symbol_main,PERIOD_CURRENT);
+   if(bars<21) return;
+   double ask = SymbolInfoDouble(symbol_main,SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbol_main,SYMBOL_BID);
+   double close = 0;
+   MqlRates rates[];
+   if(CopyRates(symbol_main,PERIOD_CURRENT,0,2,rates)>0)
+      close = rates[0].close;
+
+   double min_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MIN);
+   double max_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MAX);
+   double sl_pips = (StopLoss>0 ? StopLoss : 200);
+   if(handle_atr!=INVALID_HANDLE && ArraySize(buffer_atr)>0)
+      sl_pips = buffer_atr[0]*2;
+   double curr_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(buffer_bbands_upper[0]>0 && close>buffer_bbands_upper[0] && CountOpenPositions(POSITION_TYPE_BUY)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = ask - StopLoss * _Point;
+      double take = ask + TakeProfit * _Point;
+      if(!SecureStopLevel(ask, stop, true)) return;
+      TRADE_SAFE_CALL(trade.Buy(lot,symbol_main,ask,stop,take,"Breakout BUY"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+   if(buffer_bbands_lower[0]>0 && close<buffer_bbands_lower[0] && CountOpenPositions(POSITION_TYPE_SELL)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = bid + StopLoss * _Point;
+      double take = bid - TakeProfit * _Point;
+      if(!SecureStopLevel(bid, stop, false)) return;
+      TRADE_SAFE_CALL(trade.Sell(lot,symbol_main,bid,stop,take,"Breakout SELL"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+  }
+
+// RSI
+void Strategy_RSI(int strat_index)
+  {
+   int bars = Bars(symbol_main,PERIOD_CURRENT);
+   if(bars<15) return;
+   double ask = SymbolInfoDouble(symbol_main,SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbol_main,SYMBOL_BID);
+   double rsi = buffer_rsi[0];
+
+   double min_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MIN);
+   double max_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MAX);
+   double sl_pips = (StopLoss>0 ? StopLoss : 200);
+   if(handle_atr!=INVALID_HANDLE && ArraySize(buffer_atr)>0)
+      sl_pips = buffer_atr[0]*2;
+   double curr_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(rsi<30 && CountOpenPositions(POSITION_TYPE_BUY)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = ask - StopLoss * _Point;
+      double take = ask + TakeProfit * _Point;
+      if(!SecureStopLevel(ask, stop, true)) return;
+      TRADE_SAFE_CALL(trade.Buy(lot,symbol_main,ask,stop,take,"RSI BUY"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+   if(rsi>70 && CountOpenPositions(POSITION_TYPE_SELL)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = bid + StopLoss * _Point;
+      double take = bid - TakeProfit * _Point;
+      if(!SecureStopLevel(bid, stop, false)) return;
+      TRADE_SAFE_CALL(trade.Sell(lot,symbol_main,bid,stop,take,"RSI SELL"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+  }
+
+// MACD
+void Strategy_MACD(int strat_index)
+  {
+   int bars = Bars(symbol_main,PERIOD_CURRENT);
+   if(bars<35) return;
+   double ask = SymbolInfoDouble(symbol_main,SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbol_main,SYMBOL_BID);
+   double macd_main = buffer_macd_main[0];
+   double macd_signal = buffer_macd_signal[0];
+
+   double min_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MIN);
+   double max_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MAX);
+   double sl_pips = (StopLoss>0 ? StopLoss : 200);
+   if(handle_atr!=INVALID_HANDLE && ArraySize(buffer_atr)>0)
+      sl_pips = buffer_atr[0]*2;
+   double curr_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(macd_main>macd_signal && buffer_macd_main[1]<=buffer_macd_signal[1] && CountOpenPositions(POSITION_TYPE_BUY)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = ask - StopLoss * _Point;
+      double take = ask + TakeProfit * _Point;
+      if(!SecureStopLevel(ask, stop, true)) return;
+      TRADE_SAFE_CALL(trade.Buy(lot,symbol_main,ask,stop,take,"MACD BUY"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+   if(macd_main<macd_signal && buffer_macd_main[1]>=buffer_macd_signal[1] && CountOpenPositions(POSITION_TYPE_SELL)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = bid + StopLoss * _Point;
+      double take = bid - TakeProfit * _Point;
+      if(!SecureStopLevel(bid, stop, false)) return;
+      TRADE_SAFE_CALL(trade.Sell(lot,symbol_main,bid,stop,take,"MACD SELL"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+  }
+
+// BBands
+void Strategy_BBands(int strat_index)
+  {
+   int bars = Bars(symbol_main,PERIOD_CURRENT);
+   if(bars<21) return;
+   double ask = SymbolInfoDouble(symbol_main,SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbol_main,SYMBOL_BID);
+   double close = 0;
+   MqlRates rates[];
+   if(CopyRates(symbol_main,PERIOD_CURRENT,0,2,rates)>0)
+      close = rates[0].close;
+   double upper = buffer_bbands_upper[0];
+   double lower = buffer_bbands_lower[0];
+
+   double min_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MIN);
+   double max_lot = SymbolInfoDouble(symbol_main, SYMBOL_VOLUME_MAX);
+   double sl_pips = (StopLoss>0 ? StopLoss : 200);
+   if(handle_atr!=INVALID_HANDLE && ArraySize(buffer_atr)>0)
+      sl_pips = buffer_atr[0]*2;
+   double curr_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(close<lower && CountOpenPositions(POSITION_TYPE_BUY)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = ask - StopLoss * _Point;
+      double take = ask + TakeProfit * _Point;
+      if(!SecureStopLevel(ask, stop, true)) return;
+      TRADE_SAFE_CALL(trade.Buy(lot,symbol_main,ask,stop,take,"BBands BUY"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+   if(close>upper && CountOpenPositions(POSITION_TYPE_SELL)==0)
+     {
+      double lot = CalcDynamicLot(RiskPercent, curr_balance, sl_pips, min_lot, max_lot);
+      double stop = bid + StopLoss * _Point;
+      double take = bid - TakeProfit * _Point;
+      if(!SecureStopLevel(bid, stop, false)) return;
+      TRADE_SAFE_CALL(trade.Sell(lot,symbol_main,bid,stop,take,"BBands SELL"));
+      calc_lot = lot;
+      strategies[strat_index].TotalTrades++;
+     }
+  }
+
+// Compte le nombre de positions ouvertes d'un type
+int CountOpenPositions(ENUM_POSITION_TYPE posType)
+  {
+   int total=0;
+   for(int i=0; i<PositionsTotal(); i++)
+     {
+      if(PositionGetString(POSITION_SYMBOL)==symbol_main && PositionGetInteger(POSITION_TYPE)==posType)
+         total++;
+     }
+   return total;
+  }
+
+// ================== GESTION PARTIELLE & TRAILING & FULL CLOSE ===================
+
+// Fermeture partielle sécurisée basée sur le volume réel
+void PartialCloseManager()
+  {
+   for(int i=0; i<PositionsTotal(); i++)
+     {
+      if(PositionGetString(POSITION_SYMBOL)!=symbol_main) continue;
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      ulong ticket  = PositionGetTicket(i);
+
+      double partial1 = NormalizeDouble(volume * PartialLot1,2);
+      double partial2 = NormalizeDouble(volume * PartialLot2,2);
+
+      if(profit>=PartialClose1 && volume>partial1 + 0.0001)
+        {
+         TRADE_SAFE_CALL(trade.PositionClosePartial(ticket,partial1));
+        }
+      if(profit>=PartialClose2 && volume>partial2 + 0.0001)
+        {
+         TRADE_SAFE_CALL(trade.PositionClosePartial(ticket,partial2));
+        }
+     }
+  }
+
+// Trailing stop sécurisé
+void TrailingStopManager()
+  {
+   if(!UseTrailingStop) return;
+   double level = SymbolInfoInteger(symbol_main, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   for(int i=0; i<PositionsTotal(); i++)
+     {
+      if(PositionGetString(POSITION_SYMBOL)!=symbol_main) continue;
+      ulong ticket = PositionGetTicket(i);
+      double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+      double stop_loss = PositionGetDouble(POSITION_SL);
+      double take_profit = PositionGetDouble(POSITION_TP);
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      int type = (int)PositionGetInteger(POSITION_TYPE);
+      double bid = SymbolInfoDouble(symbol_main,SYMBOL_BID);
+      double ask = SymbolInfoDouble(symbol_main,SYMBOL_ASK);
+      double new_sl;
+      if(type==POSITION_TYPE_BUY)
+        {
+         new_sl = bid - TrailingStop * _Point;
+         if((new_sl>stop_loss+TrailingStep*_Point) && (new_sl <= open_price - level))
+           TRADE_SAFE_CALL(trade.PositionModify(ticket,NormalizeDouble(new_sl,_Digits),take_profit));
+        }
+      else if(type==POSITION_TYPE_SELL)
+        {
+         new_sl = ask + TrailingStop * _Point;
+         if((new_sl<stop_loss-TrailingStep*_Point || stop_loss==0) && (new_sl >= open_price + level))
+           TRADE_SAFE_CALL(trade.PositionModify(ticket,NormalizeDouble(new_sl,_Digits),take_profit));
+        }
+     }
+  }
+
+// FULL CLOSE AVEC CONFIRMATION (variable full_close_triggered)
+void FullCloseAll()
+  {
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      if(PositionGetString(POSITION_SYMBOL)==symbol_main)
+        {
+         ulong ticket = PositionGetTicket(i);
+         TRADE_SAFE_CALL(trade.PositionClose(ticket));
+        }
+     }
+   last_error = "Toutes les positions fermées !";
+   dashboard_needs_update = true;
+  }
+  
+// ========== DASHBOARD PRO ==========
+
+#define DASHBOARD_BG       clrGainsboro
+#define DASHBOARD_TITLE    clrBlack
+#define DASHBOARD_LABEL    clrDimGray
+#define DASHBOARD_POS      30
+#define DASHBOARD_WIDTH    520
+#define DASHBOARD_HEIGHT   260
+
+void CreateDashboardPro()
+  {
+   if(ObjectFind(0,"dashboard_bg")<0)
+     {
+      ObjectCreate(0,"dashboard_bg",OBJ_RECTANGLE_LABEL,0,0,0);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_XDISTANCE,DASHBOARD_POS);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_YDISTANCE,DASHBOARD_POS);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_WIDTH,DASHBOARD_WIDTH);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_YSIZE,DASHBOARD_HEIGHT);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_BGCOLOR,DASHBOARD_BG);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_COLOR,DASHBOARD_BG);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_BACK,true);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_SELECTED,false);
+      ObjectSetInteger(0,"dashboard_bg",OBJPROP_BORDER_TYPE,BORDER_FLAT);
+     }
+   if(ObjectFind(0,"dashboard_title")<0)
+     {
+      ObjectCreate(0,"dashboard_title",OBJ_LABEL,0,0,0);
+      ObjectSetInteger(0,"dashboard_title",OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,"dashboard_title",OBJPROP_XDISTANCE,DASHBOARD_POS+20);
+      ObjectSetInteger(0,"dashboard_title",OBJPROP_YDISTANCE,DASHBOARD_POS+10);
+      ObjectSetInteger(0,"dashboard_title",OBJPROP_FONTSIZE,16);
+      ObjectSetInteger(0,"dashboard_title",OBJPROP_COLOR,DASHBOARD_TITLE);
+      ObjectSetString(0,"dashboard_title",OBJPROP_TEXT,"DIAMOND PRO v21  |  " + _Symbol + "  |  TF: " + EnumToString(Period()));
+     }
+   string lbls[] = {
+      "Balance", "Equity", "Profit", "Spread", "Trades", "Lots", "Winrate", "DailyPL", "Status", "FullCloseBtn", "Erreur"
+   };
+   int y0 = DASHBOARD_POS+45;
+   int dy = 22;
+   for(int i=0; i<7; i++)
+     {
+      string obj = "dashboard_" + lbls[i];
+      if(ObjectFind(0,obj)<0)
+        {
+         ObjectCreate(0,obj,OBJ_LABEL,0,0,0);
+         ObjectSetInteger(0,obj,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+         ObjectSetInteger(0,obj,OBJPROP_XDISTANCE,DASHBOARD_POS+28);
+         ObjectSetInteger(0,obj,OBJPROP_YDISTANCE,y0+(i*dy));
+         ObjectSetInteger(0,obj,OBJPROP_FONTSIZE,12);
+         ObjectSetInteger(0,obj,OBJPROP_COLOR,DASHBOARD_LABEL);
+        }
+     }
+   if(ObjectFind(0,"dashboard_DailyPL")<0)
+     {
+      ObjectCreate(0,"dashboard_DailyPL",OBJ_LABEL,0,0,0);
+      ObjectSetInteger(0,"dashboard_DailyPL",OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,"dashboard_DailyPL",OBJPROP_XDISTANCE,DASHBOARD_POS+28);
+      ObjectSetInteger(0,"dashboard_DailyPL",OBJPROP_YDISTANCE,y0+7*dy);
+      ObjectSetInteger(0,"dashboard_DailyPL",OBJPROP_FONTSIZE,12);
+      ObjectSetInteger(0,"dashboard_DailyPL",OBJPROP_COLOR,DASHBOARD_LABEL);
+     }
+   if(ObjectFind(0,"dashboard_Status")<0)
+     {
+      ObjectCreate(0,"dashboard_Status",OBJ_LABEL,0,0,0);
+      ObjectSetInteger(0,"dashboard_Status",OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,"dashboard_Status",OBJPROP_XDISTANCE,DASHBOARD_POS+28);
+      ObjectSetInteger(0,"dashboard_Status",OBJPROP_YDISTANCE,y0+8*dy+8);
+      ObjectSetInteger(0,"dashboard_Status",OBJPROP_FONTSIZE,13);
+      ObjectSetInteger(0,"dashboard_Status",OBJPROP_COLOR,clrBlack);
+     }
+   if(ObjectFind(0,"dashboard_FullCloseBtn")<0)
+     {
+      ObjectCreate(0,"dashboard_FullCloseBtn",OBJ_BUTTON,0,0,0);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_XDISTANCE,DASHBOARD_POS+28);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_YDISTANCE,y0+10*dy);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_WIDTH,170);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_YSIZE,28);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_BGCOLOR,clrRed);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_COLOR,clrWhite);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_BORDER_TYPE,BORDER_RAISED);
+      ObjectSetInteger(0,"dashboard_FullCloseBtn",OBJPROP_FONTSIZE,13);
+      ObjectSetString(0,"dashboard_FullCloseBtn",OBJPROP_TEXT,"FULL CLOSE (Confirmer)");
+     }
+   if(ObjectFind(0,"dashboard_Erreur")<0)
+     {
+      ObjectCreate(0,"dashboard_Erreur",OBJ_LABEL,0,0,0);
+      ObjectSetInteger(0,"dashboard_Erreur",OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,"dashboard_Erreur",OBJPROP_XDISTANCE,DASHBOARD_POS+28);
+      ObjectSetInteger(0,"dashboard_Erreur",OBJPROP_YDISTANCE,y0+12*dy);
+      ObjectSetInteger(0,"dashboard_Erreur",OBJPROP_FONTSIZE,11);
+      ObjectSetInteger(0,"dashboard_Erreur",OBJPROP_COLOR,clrRed);
+     }
+  }
+
+void UpdateDashboardPro(double balance, double equity, double profit, double spread, int trades, double lots, double winrate, double dailyPL, string statut, string erreur)
+  {
+   ObjectSetString(0,"dashboard_Balance",OBJPROP_TEXT,StringFormat("Balance : %.2f",balance));
+   ObjectSetString(0,"dashboard_Equity",OBJPROP_TEXT, StringFormat("Equity  : %.2f",equity));
+   ObjectSetString(0,"dashboard_Profit",OBJPROP_TEXT, StringFormat("Profit  : %s%.2f", profit>=0?"+":"", profit));
+   ObjectSetInteger(0,"dashboard_Profit",OBJPROP_COLOR, profit>=0?clrForestGreen:clrFireBrick);
+   ObjectSetString(0,"dashboard_Spread",OBJPROP_TEXT, StringFormat("Spread  : %.1f pts",spread));
+   ObjectSetString(0,"dashboard_Trades",OBJPROP_TEXT, StringFormat("Trades ouverts : %d",trades));
+   ObjectSetString(0,"dashboard_Lots",OBJPROP_TEXT, StringFormat("Lots totaux   : %.2f",lots));
+   ObjectSetString(0,"dashboard_Winrate",OBJPROP_TEXT, StringFormat("Winrate       : %.1f%%",winrate));
+   ObjectSetString(0,"dashboard_DailyPL",OBJPROP_TEXT, StringFormat("P/L du jour   : %s%.2f", dailyPL>=0?"+":"", dailyPL));
+   ObjectSetInteger(0,"dashboard_DailyPL",OBJPROP_COLOR, dailyPL>=0?clrForestGreen:clrFireBrick);
+   ObjectSetString(0,"dashboard_Status",OBJPROP_TEXT, "Statut EA : " + statut);
+   ObjectSetString(0,"dashboard_Erreur",OBJPROP_TEXT, (erreur!="") ? "Erreur : "+erreur : "");
+  }
+
+void DeleteDashboardPro()
+  {
+   string objs[] = {
+      "dashboard_bg", "dashboard_title",
+      "dashboard_Balance", "dashboard_Equity", "dashboard_Profit", "dashboard_Spread",
+      "dashboard_Trades", "dashboard_Lots", "dashboard_Winrate", "dashboard_DailyPL",
+      "dashboard_Status", "dashboard_FullCloseBtn", "dashboard_Erreur"
+   };
+   for(int i=0;i<ArraySize(objs);i++)
+     ObjectDelete(0,objs[i]);
+  }
+
+// ========== FIN DASHBOARD PRO ==========
+
+  
+  // ===================== SYSTEME PRINCIPAL MQL5 =======================
+
+// Réinitialisation de tout l'EA
+void ResetAll()
+  {
+   InitGlobalVars();
+   InitializeIndicators();
+   dashboard_needs_update = true;
+  }
+
+// Date du jour (pour stats journalières)
+datetime DateOfDay(datetime t)
+  {
+   MqlDateTime tm;
+   TimeToStruct(t, tm);
+   tm.hour = 0; tm.min = 0; tm.sec = 0;
+   return StructToTime(tm);
+  }
+
+// Mise à jour stats journalières (profit, wins, losses, trades)
+void UpdateDailyStatsAfterTrade(double profit, bool win)
+  {
+   datetime today = DateOfDay(TimeCurrent());
+   int idx = -1;
+   for(int i=0; i<ArraySize(day_stats); i++)
+     {
+      if(day_stats[i].Day == today)
+        { idx = i; break; }
+      if(day_stats[i].Day == 0 && idx == -1)
+         idx = i;
+     }
+   if(idx >= 0)
+     {
+      day_stats[idx].Day = today;
+      day_stats[idx].Profit += profit;
+      day_stats[idx].Trades++;
+      if(win) day_stats[idx].Wins++;
+      else day_stats[idx].Losses++;
+     }
+  }
+
+//======================= EVENEMENTS MQL5 =======================
+
+// Initialisation
+int OnInit()
+  {
+   ResetAll();
+   CheckGoldSymbol();
+   InitializeIndicators();
+   strategies_total_init();
+   CreateDashboardPro();
+   UpdateDashboard();
+   EventSetTimer(60);
+   
+   return(INIT_SUCCEEDED);
+  }
+
+// Désinitialisation
+void OnDeinit(const int reason)
+  {
+   DeleteDashboard();
+   EventKillTimer();
+  }
+
+// Tick principal
+void OnTick()
+  {
+   UpdateIndicators();
+   ExecuteStrategies();
+   PartialCloseManager();
+   TrailingStopManager();
+
+   if(full_close_triggered && EnableFullClose)
+     {
+      // Confirmation demandée avant fermeture totale
+      static datetime last_confirm = 0;
+      if(last_confirm==0 || (TimeCurrent()-last_confirm) > 30)
+        {
+         last_error = "Cliquez à nouveau sur FULL CLOSE pour confirmer !";
+         last_confirm = TimeCurrent();
+        }
+      else
+        {
+         FullCloseAll();
+         last_error = "FULL CLOSE exécuté !";
+         last_confirm = 0;
+        }
+      full_close_triggered = false;
+      dashboard_needs_update = true;
+     }
+
+   // -------- DÉBUT DU BLOC DASHBOARD PRO --------
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double profit = AccountInfoDouble(ACCOUNT_PROFIT);
+   double spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
+   int trades = 0; double lots = 0.0;
+   for(int i=0; i<PositionsTotal(); i++)
+     {
+      if(PositionGetSymbol(i)==_Symbol)
+        {
+         trades++;
+         lots += PositionGetDouble(POSITION_VOLUME);
+        }
+     }
+   double winrate = 0.0;  // À remplacer par ton calcul réel si tu l’as
+   double dailyPL = 0.0;  // Idem
+   string statut = (ea_active ? "ACTIVE" : "PAUSE");
+   string erreur = last_error;
+   UpdateDashboard(balance, equity, profit, spread, trades, lots, winrate, dailyPL, statut, erreur);
+   // -------- FIN DU BLOC DASHBOARD PRO --------
+
+   if(dashboard_needs_update)
+      UpdateDashboard();
+  }
+
+// Timer pour rafraîchir dashboard
+void OnTimer()
+  {
+   dashboard_needs_update = true;
+  }
+
+// Trade : update dashboard après chaque trade
+void OnTrade()
+  {
+   dashboard_needs_update = true;
+  }
+
+// Evènement graphique : gestion bouton FULL CLOSE + PAUSE
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+  {
+   if(id == CHARTEVENT_OBJECT_CLICK)
+     {
+      string btn = sparam;
+      if(btn == "btn_fullclose")
+        {
+         full_close_triggered = true;
+        }
+      // Ajoute ici si besoin le bouton "pause" plus tard
+     }
+  }
+
+// Transaction : update stats, wins, losses après trade
+void OnTradeTransaction(
+   const MqlTradeTransaction &trans,
+   const MqlTradeRequest &request,
+   const MqlTradeResult &result)
+  {
+   if(trans.type==TRADE_TRANSACTION_DEAL_ADD ||
+      trans.type==TRADE_TRANSACTION_DEAL_UPDATE)
+     {
+      if(trans.deal_type == DEAL_TYPE_BUY || trans.deal_type == DEAL_TYPE_SELL)
+        {
+         if(HistoryDealSelect(trans.deal))
+           {
+            double deal_profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+            bool win = (deal_profit > 0.0);
+            UpdateDailyStatsAfterTrade(deal_profit, win);
+           }
+         dashboard_needs_update = true;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|           DIAMOND PRO v21 - Copilot x amirbs14                   |
+//+------------------------------------------------------------------+
+
+
+  
