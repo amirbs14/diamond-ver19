@@ -956,8 +956,10 @@ int OnInit()
    CheckGoldSymbol();
    InitializeIndicators();
    strategies_total_init();
+   CreateDashboard();
    UpdateDashboard();
    EventSetTimer(60);
+   
    return(INIT_SUCCEEDED);
   }
 
@@ -994,6 +996,27 @@ void OnTick()
       full_close_triggered = false;
       dashboard_needs_update = true;
      }
+
+   // -------- DÉBUT DU BLOC DASHBOARD PRO --------
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double profit = AccountInfoDouble(ACCOUNT_PROFIT);
+   double spread = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID)) / _Point;
+   int trades = 0; double lots = 0.0;
+   for(int i=0; i<PositionsTotal(); i++)
+     {
+      if(PositionGetSymbol(i)==_Symbol)
+        {
+         trades++;
+         lots += PositionGetDouble(POSITION_VOLUME);
+        }
+     }
+   double winrate = 0.0;  // À remplacer par ton calcul réel si tu l’as
+   double dailyPL = 0.0;  // Idem
+   string statut = (ea_active ? "ACTIVE" : "PAUSE");
+   string erreur = last_error;
+   UpdateDashboard(balance, equity, profit, spread, trades, lots, winrate, dailyPL, statut, erreur);
+   // -------- FIN DU BLOC DASHBOARD PRO --------
 
    if(dashboard_needs_update)
       UpdateDashboard();
