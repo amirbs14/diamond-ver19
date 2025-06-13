@@ -1,0 +1,355 @@
+Patch Complet pour DIAMOND V21
+1. Sorties partielles manquantes (Priorité élevée)
+Modifications :
+
+Ajouter dans CTradeManager (ligne ~650):
+
+void CTradeManager::PartialClose(ulong ticket, double percentage) {
+   if(PositionSelectByTicket(ticket)) {
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double newVolume = volume * percentage / 100.0;
+      trade.PositionClosePartial(ticket, newVolume);
+   }
+}
+
+Ajouter dans OnTick() (ligne ~1900):
+void OnTick() {
+   // ... code existant ...
+   
+   // Gestion des sorties partielles
+   for(int i = PositionsTotal()-1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         double tp = PositionGetDouble(POSITION_TP);
+         double sl = PositionGetDouble(POSITION_SL);
+         double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+         double current = PositionGetDouble(POSITION_PRICE_CURRENT);
+         
+         // Fermer 50% à +1R
+         if(!trailingActive && profit >= (tp - entry)) {
+            tradeManager.PartialClose(ticket, 50);
+            trailingActive = true;
+         }
+      }
+   }
+   
+   // ... suite du code ...
+}
+
+2. Ratio TP/SL déséquilibré (Priorité élevée)
+Modifications :
+
+Remplacer la fonction SetStopTp() (ligne ~1750):
+
+void SetStopTp(STradeSignal &signal, bool isBuy) {
+   double atr = iATR(_Symbol, _Period, 14);
+   double stopDistance = atr * 1.5;
+   double maxStop = (_Symbol=="USDJPY") ? 0.5 : 0.01;
+   double minStop = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   
+   if(stopDistance < minStop) stopDistance = minStop;
+   if(stopDistance > maxStop) stopDistance = maxStop;
+   
+   if(isBuy) {
+      signal.sl = signal.price - stopDistance;
+      signal.tp = signal.price + stopDistance * 3; // Ratio 1:3
+   } else {
+      signal.sl = signal.price + stopDistance;
+      signal.tp = signal.price - stopDistance * 3; // Ratio 1:3
+   }
+}
+
+3. Sorties partielles dynamiques (Priorité élevée)
+Modifications :
+
+Ajouter dans CTradeManager (ligne ~650):
+
+void CTradeManager::ManagePositions() {
+   for(int i = PositionsTotal()-1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+         double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+         double tp = PositionGetDouble(POSITION_TP);
+         double current = PositionGetDouble(POSITION_PRICE_CURRENT);
+         
+         double profitProgress = (current - entry) / (tp - entry);
+         
+         if(profitProgress >= 0.15 && DetectMarketAnomaly()) {
+            trade.PositionClose(ticket);
+         }
+         else if(profitProgress >= 0.5) {
+            PartialClose(ticket, 50);
+         }
+      }
+   }
+}
+
+4. Gestion des paires volatiles (Priorité élevée)
+Modifications :
+
+Ajouter dans CStrategyManager (ligne ~500):
+
+bool IsGoodVolatility() {
+   double atr = iATR(_Symbol, _Period, 14);
+   double stdDev = iStdDev(_Symbol, _Period, 20, 0, MODE_SMA, PRICE_CLOSE);
+   
+   double atrThreshold, stdDevThreshold;
+   if(_Symbol == "GBPJPY" || _Symbol == "XAUUSD") {
+      atrThreshold = 0.0020;
+      stdDevThreshold = 0.0015;
+   } else {
+      atrThreshold = 0.0010;
+      stdDevThreshold = 0.0008;
+   }
+   
+   return (atr > atrThreshold && stdDev > stdDevThreshold);
+}
+
+5. Optimisation de la sélection des stratégies (Priorité moyenne)
+Modifications :
+
+Mettre à jour CheckTradingConditions() (ligne ~1400):
+
+bool CheckTradingConditions(STradeSignal &signal) {
+   // Trier les stratégies par poids décroissant
+   ArraySort(strategyPerformance, WHOLE_ARRAY, 0, MODE_DESCEND);
+   
+   for(int i = 0; i < STRATEGY_COUNT; i++) {
+      if(!strategyPerformance[i].enabled) continue;
+      
+      bool strategySignal = false;
+      switch(strategyPerformance[i].strategy) {
+         // ... cases existants ...
+      }
+      
+      if(strategySignal && ValidateTrade(signal)) {
+         return true;
+      }
+   }
+   return false;
+}
+
+6. Gestion active après l'ouverture (Priorité élevée)
+Modifications :
+
+Ajouter dans CTradeManager (ligne ~650):
+
+void CTradeManager::UpdateTrailingStop() {
+   for(int i = PositionsTotal()-1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) {
+         double atr = iATR(_Symbol, _Period, 14);
+         double current = PositionGetDouble(POSITION_PRICE_CURRENT);
+         double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+         double sl = PositionGetDouble(POSITION_SL);
+         double newSl;
+         
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) {
+            // Break-even +1.5 ATR
+            if(current > entry + 1.5*atr && sl < entry) {
+               newSl = entry;
+               trade.PositionModify(ticket, newSl, PositionGetDouble(POSITION_TP));
+            }
+            // Trailing stop dynamique
+            else if(current > entry + atr) {
+               newSl = current - atr;
+               if(newSl > sl) {
+                  trade.PositionModify(ticket, newSl, PositionGetDouble(POSITION_TP));
+               }
+            }
+         }
+         else { // SELL
+            if(current < entry - 1.5*atr && sl > entry) {
+               newSl = entry;
+               trade.PositionModify(ticket, newSl, PositionGetDouble(POSITION_TP));
+            }
+            else if(current < entry - atr) {
+               newSl = current + atr;
+               if(newSl < sl) {
+                  trade.PositionModify(ticket, newSl, PositionGetDouble(POSITION_TP));
+               }
+            }
+         }
+      }
+   }
+}
+
+7. Intelligence de sortie basique (Priorité moyenne)
+Modifications :
+
+Mettre à jour CheckIntelligentExit() (ligne ~2000):
+
+void CheckIntelligentExit() {
+   // ... code existant ...
+   
+   // Ajouter des conditions de momentum
+   double rsi[], macd[];
+   if(CopyBuffer(rsiHandle, 0, 0, 2, rsi) == 2 && CopyBuffer(macdHandle, 0, 0, 2, macd) == 2) {
+      bool momentumReversal = (rsi[0] > 70 && rsi[1] <= 70) || (rsi[0] < 30 && rsi[1] >= 30);
+      bool macdCross = (macd[0] > 0 && macd[1] <= 0) || (macd[0] < 0 && macd[1] >= 0);
+      
+      if(momentumReversal || macdCross) {
+         PerformFullClose();
+      }
+   }
+}
+
+--------------------------------------------------
+Fichier Patch Final (Partie 1/2)
+
+//+------------------------------------------------------------------+
+//| DIAMOND V21 PATCH - PART 1/2                                    |
+//+------------------------------------------------------------------+
+
+// 1. Ajout de la gestion des sorties partielles
+void CTradeManager::PartialClose(ulong ticket, double percentage) {
+   if(PositionSelectByTicket(ticket)) {
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double newVolume = volume * percentage / 100.0;
+      trade.PositionClosePartial(ticket, newVolume);
+   }
+}
+
+// 2. Mise à jour du ratio TP/SL
+void SetStopTp(STradeSignal &signal, bool isBuy) {
+   double atr = iATR(_Symbol, _Period, 14);
+   double stopDistance = atr * 1.5;
+   double maxStop = (_Symbol=="USDJPY") ? 0.5 : 0.01;
+   double minStop = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   
+   if(stopDistance < minStop) stopDistance = minStop;
+   if(stopDistance > maxStop) stopDistance = maxStop;
+   
+   if(isBuy) {
+      signal.sl = signal.price - stopDistance;
+      signal.tp = signal.price + stopDistance * 3; // Ratio 1:3
+   } else {
+      signal.sl = signal.price + stopDistance;
+      signal.tp = signal.price - stopDistance * 3; // Ratio 1:3
+   }
+}
+
+// 3. Gestion dynamique des positions
+void CTradeManager::ManagePositions() {
+   for(int i = PositionsTotal()-1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+         double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+         double tp = PositionGetDouble(POSITION_TP);
+         double current = PositionGetDouble(POSITION_PRICE_CURRENT);
+         
+         double profitProgress = (current - entry) / (tp - entry);
+         
+         if(profitProgress >= 0.15 && DetectMarketAnomaly()) {
+            trade.PositionClose(ticket);
+         }
+         else if(profitProgress >= 0.5) {
+            PartialClose(ticket, 50);
+         }
+      }
+   }
+}
+
+----------------------------------------
+Fichier Patch Final (Partie 2/2)
+
+//+------------------------------------------------------------------+
+//| DIAMOND V21 PATCH - PART 2/2                                    |
+//+------------------------------------------------------------------+
+
+// 4. Filtre de volatilité amélioré
+bool IsGoodVolatility() {
+   double atr = iATR(_Symbol, _Period, 14);
+   double stdDev = iStdDev(_Symbol, _Period, 20, 0, MODE_SMA, PRICE_CLOSE);
+   
+   double atrThreshold, stdDevThreshold;
+   if(_Symbol == "GBPJPY" || _Symbol == "XAUUSD") {
+      atrThreshold = 0.0020;
+      stdDevThreshold = 0.0015;
+   } else {
+      atrThreshold = 0.0010;
+      stdDevThreshold = 0.0008;
+   }
+   
+   return (atr > atrThreshold && stdDev > stdDevThreshold);
+}
+
+// 5. Tri des stratégies par performance
+bool CheckTradingConditions(STradeSignal &signal) {
+   ArraySort(strategyPerformance, WHOLE_ARRAY, 0, MODE_DESCEND);
+   // ... reste du code existant ...
+}
+
+// 6. Trailing stop dynamique
+void CTradeManager::UpdateTrailingStop() {
+   for(int i = PositionsTotal()-1; i >= 0; i--) {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket)) {
+         double atr = iATR(_Symbol, _Period, 14);
+         double current = PositionGetDouble(POSITION_PRICE_CURRENT);
+         double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+         double sl = PositionGetDouble(POSITION_SL);
+         double newSl;
+         
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) {
+            if(current > entry + 1.5*atr && sl < entry) {
+               newSl = entry;
+               trade.PositionModify(ticket, newSl, PositionGetDouble(POSITION_TP));
+            }
+            else if(current > entry + atr) {
+               newSl = current - atr;
+               if(newSl > sl) trade.PositionModify(ticket, newSl, PositionGetDouble(POSITION_TP));
+            }
+         }
+         else { // SELL
+            if(current < entry - 1.5*atr && sl > entry) {
+               newSl = entry;
+               trade.PositionModify(ticket, newSl, PositionGetDouble(POSITION_TP));
+            }
+            else if(current < entry - atr) {
+               newSl = current + atr;
+               if(newSl < sl) trade.PositionModify(ticket, newSl, PositionGetDouble(POSITION_TP));
+            }
+         }
+      }
+   }
+}
+
+// 7. Intelligence de sortie
+void CheckIntelligentExit() {
+   // ... code existant ...
+   
+   double rsi[], macd[];
+   if(CopyBuffer(rsiHandle, 0, 0, 2, rsi) == 2 && CopyBuffer(macdHandle, 0, 0, 2, macd) == 2) {
+      bool momentumReversal = (rsi[0] > 70 && rsi[1] <= 70) || (rsi[0] < 30 && rsi[1] >= 30);
+      bool macdCross = (macd[0] > 0 && macd[1] <= 0) || (macd[0] < 0 && macd[1] >= 0);
+      
+      if(momentumReversal || macdCross) PerformFullClose();
+   }
+}
+
+Instructions d'Application:
+Copiez chaque section du patch dans les zones correspondantes de votre EA
+
+Vérifiez que toutes les fonctions sont bien intégrées dans les classes appropriées
+
+Testez minutieusement chaque nouvelle fonctionnalité sur un compte de démonstration
+
+Surveillez particulièrement la gestion des positions et les sorties partielles
+
+Ces modifications rendront votre EA plus robuste avec:
+
+Une meilleure gestion des risques
+
+Des ratios TP/SL plus équilibrés
+
+Une sortie dynamique des positions
+
+Une meilleure adaptation à la volatilité
+
+Une sélection optimisée des stratégies
+
+Un trailing stop intelligent
+
+Des sorties basées sur le momentum
